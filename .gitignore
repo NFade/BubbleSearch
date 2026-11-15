@@ -1,0 +1,9 @@
+node_modules/
+web/dist/
+.env
+.cache/
+*.log
+.DS_Store
+
+# Приватный список кошельков Axiom: импортируется через сайт («Импорт списка»)
+data/axiom-wallets.json

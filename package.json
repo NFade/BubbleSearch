@@ -1,0 +1,25 @@
+{
+  "name": "bubblesearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Поиск связей кошелька Solana со списком отслеживаемых кошельков, с картой пузырей",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "setup": "npm --prefix web install",
+    "dev": "node scripts/dev.ts",
+    "server": "node --env-file-if-exists=.env server/main.ts",
+    "web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "start": "node --env-file-if-exists=.env server/main.ts --static",
+    "test": "node --test \"test/*.test.ts\"",
+    "index-tracked": "node --env-file-if-exists=.env scripts/index-tracked.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
