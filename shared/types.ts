@@ -338,6 +338,132 @@ export interface GroupResult {
   stats: AnalyzeStats;
 }
 
+// ---------- Поиск бандла ----------
+//
+// Кошельки, которые покупают и продают те же токены, что и цель, в те же минуты (бандл одного владельца, бот на многих кошельках).
+// Источник: история пула каждого токена (контрагент цели в её сделке: бондинг-кривая, пул) в окне вокруг сделки цели,
+// поэтому видны все покупатели, не только кошельки из списка.
+
+export interface BundleOptions {
+  /** Сколько последних купленных цель токенов проверять: 3–30. По умолчанию 10. */
+  tokens?: number;
+  /** Окно вокруг сделки цели в минутах: ±windowMin. По умолчанию 5. */
+  windowMin?: 1 | 3 | 5 | 10 | 30;
+  /** Учитывать продажи: совместный выход из токена (отдельное окно вокруг продажи цели). По умолчанию true. */
+  sells?: boolean;
+  /**
+   * Максимальный поиск: у сильных кандидатов проверяются первые пополнения и собственные покупки (отличает бандл от копитрейдеров),
+   * плюс второй круг по токенам самых сильных — находит кошельки бандла, торговавшие без цели. Дороже: +300–1500 кредитов.
+   */
+  expand?: boolean;
+  refresh?: boolean;
+}
+
+/** Наибольшее число страниц истории пула (по 100 переводов, 10 кредитов) на одно окно. */
+// BUNDLE_MAX_PAGES = 20 — оценка стоимости до запуска: от tokens × (sells ? 2 : 1) × 10 до tokens × (sells ? 2 : 1) × 200 кредитов.
+
+/** POST /api/bundle — ответ: AnalyzeStartResponse, дальше опрос /api/jobs/:id (kind 'bundle'). */
+export interface BundleRequest extends BundleOptions {
+  address: string;
+}
+
+/**
+ * Признаки бандла.
+ * same-tx — купили в одной транзакции (одна транзакция на несколько кошельков — инструмент бандлера);
+ * same-slot — в том же слоте (≈0.4 с); near — в пределах 30 секунд; window — в пределах окна;
+ * co-sell — совместные продажи; transfers — прямые переводы SOL или токенов с целью;
+ * common-funder — общий первый источник SOL с целью или с другим найденным кошельком; funded-by-target — цель первой пополнила кошелёк (или наоборот);
+ * overlap — кошелёк покупает в основном те же токены, что и цель;
+ * copytrader — похоже на копитрейдера: стабильно заходит через несколько секунд после цели и больше ничем не связан (это предупреждение, оценку снижает).
+ */
+export type BundleSignal = 'same-tx' | 'same-slot' | 'near' | 'window' | 'co-sell' | 'transfers' | 'common-funder' | 'funded-by-target' | 'overlap' | 'copytrader';
+
+/** Один проверенный токен. */
+export interface BundleToken {
+  mint: string;
+  /** Сокращённый mint (названия токенов не загружаются). */
+  symbol: string;
+  /** Чья сделка задаёт окна: цель или кошелёк первого круга (при expand). */
+  seed: string;
+  /** Адрес, чья история читалась (контрагент сделки seed: бондинг-кривая, пул); null — не найден. */
+  pool: string | null;
+  buySlot: number | null;
+  buyTime: number | null;
+  buySignature: string | null;
+  sellSlot: number | null;
+  sellTime: number | null;
+  sellSignature: string | null;
+  /** Сколько других кошельков торговали этим токеном в окнах (толпа: чем больше, тем слабее каждое совпадение). */
+  crowd: number;
+  /** Сколько найденных кошельков совпали в этом токене. */
+  matched: number;
+  /** Сколько переводов пула прочитано. */
+  transfersScanned: number;
+  /** Окно прочитано не полностью (упёрлись в предел страниц). */
+  truncated: boolean;
+  /** Почему токен пропущен (общий адрес площадки, нет пула, ошибка); null — проверен. */
+  skipped: string | null;
+}
+
+/** Одно совпадение кандидата со сделкой seed. */
+export interface BundleMatch {
+  mint: string;
+  kind: 'buy' | 'sell';
+  seed: string;
+  signal: 'same-tx' | 'same-slot' | 'near' | 'window';
+  /** Время сделки кандидата минус время сделки seed, секунды (минус — раньше seed); null — время неизвестно. */
+  dtSec: number | null;
+  slotDelta: number;
+  /** Транзакция кандидата. */
+  signature: string;
+  seedSignature: string;
+  time: number | null;
+  /** SOL, потраченный (покупка) или полученный (продажа) кандидатом в этой сделке, если виден в истории пула. */
+  sol: number | null;
+  /** Вклад в оценку 0..1. */
+  weight: number;
+}
+
+export interface BundleWallet {
+  address: string;
+  /** 0..1. */
+  score: number;
+  /** Разных токенов с совпадениями. */
+  tokensMatched: number;
+  signals: BundleSignal[];
+  /** Объяснения на русском, по одному предложению. */
+  reasons: string[];
+  /** По убыванию weight, не более 40. */
+  matches: BundleMatch[];
+  tracked: TrackedWallet | null;
+  /** Найден во втором круге — адрес кошелька первого круга, через которого найден; null — найден по сделкам цели. */
+  via: string | null;
+  /** Прямые переводы с целью по загруженной истории цели (SOL в обе стороны и число переводов, включая токены). */
+  totalSol: number;
+  transferCount: number;
+  /** Первый источник SOL (только при expand, иначе null). */
+  firstFunder: string | null;
+  /** Доля купленных кошельком токенов, которые покупала и цель, 0..1 (только при expand, иначе null). */
+  overlap: number | null;
+  /** Похоже на копитрейдера (см. BundleSignal 'copytrader'). */
+  copytrader: boolean;
+}
+
+export interface BundleResult {
+  target: string;
+  targetTracked: TrackedWallet | null;
+  generatedAt: number;
+  options: Required<BundleOptions>;
+  /** Сначала токены цели (новые сверху), затем токены второго круга. */
+  tokens: BundleToken[];
+  /** По убыванию score, не более 60. */
+  wallets: BundleWallet[];
+  /** Сколько кошельков отброшено: bots — десятки сделок по одному токену (боты, роутеры); sandwich — покупка и продажа за пару секунд; programs — аккаунты программ. */
+  excluded: { bots: number; sandwich: number; programs: number };
+  warnings: string[];
+  stats: AnalyzeStats & { tokensScanned: number; transfersScanned: number };
+}
+
 // Оценка стоимости «глубокой» карты группы из n кошельков для показа до запуска: n·(n−1)/2 × 10 + n × 70 + 200 (проверка посредников) кредитов.
 
 // ---------- HTTP API ----------
@@ -384,13 +510,15 @@ export interface JobResponse {
   status: 'running' | 'done' | 'error';
   /** Сообщения о ходе работы, по порядку. */
   progress: string[];
-  kind: 'analyze' | 'link' | 'group';
+  kind: 'analyze' | 'link' | 'group' | 'bundle';
   /** Для kind = 'analyze'. */
   result?: AnalyzeResult;
   /** Для kind = 'link'. */
   link?: LinkResult;
   /** Для kind = 'group'. */
   group?: GroupResult;
+  /** Для kind = 'bundle'. */
+  bundle?: BundleResult;
   error?: string;
 }
 

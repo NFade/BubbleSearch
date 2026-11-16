@@ -6,6 +6,7 @@ import { LinkPanel, SidePanel } from './SidePanel.tsx';
 import { Drawer } from './Drawer.tsx';
 import { TopBar, type Hops, type Mode, type Tab } from './TopBar.tsx';
 import { WalletsTab } from './WalletsTab.tsx';
+import { BundleTab } from './BundleTab.tsx';
 import { ImportModal } from './ImportModal.tsx';
 import { addHistory, clearHistory, entryForPair, entryForSingle, loadHistory, type HistoryEntry } from './history.ts';
 import {
@@ -73,23 +74,26 @@ export function App() {
 
   const [tab, setTabState] = useState<Tab>(() => {
     try {
-      return !initial.spec && new URLSearchParams(window.location.search).get('tab') === 'wallets' ? 'wallets' : 'search';
+      const t = new URLSearchParams(window.location.search).get('tab');
+      return !initial.spec && (t === 'wallets' || t === 'bundle') ? t : 'search';
     } catch {
       return 'search';
     }
   });
   /** Вкладка «Кошельки» монтируется при первом открытии и дальше остаётся в памяти (выбор и результат не теряются). */
   const [walletsOpened, setWalletsOpened] = useState(tab === 'wallets');
+  /** Вкладка «Бандл» — так же: монтируется при первом открытии и остаётся в памяти. */
+  const [bundleOpened, setBundleOpened] = useState(tab === 'bundle');
   const searchUrl = useRef('');
   const setTab = useCallback((t: Tab) => {
     setTabState((cur) => {
       if (cur === t) return cur;
       try {
-        if (t === 'wallets') {
-          searchUrl.current = window.location.search;
+        if (t === 'wallets' || t === 'bundle') {
+          if (cur === 'search') searchUrl.current = window.location.search;
           const q = new URLSearchParams();
           if (isMock) q.set('mock', '1');
-          q.set('tab', 'wallets');
+          q.set('tab', t);
           window.history.replaceState(null, '', `${window.location.pathname}?${q.toString()}`);
         } else {
           window.history.replaceState(null, '', `${window.location.pathname}${searchUrl.current || (isMock ? '?mock=1' : '')}`);
@@ -100,6 +104,7 @@ export function App() {
       return t;
     });
     if (t === 'wallets') setWalletsOpened(true);
+    if (t === 'bundle') setBundleOpened(true);
   }, []);
   const [mode, setMode] = useState<Mode>(initial.mode);
   const [address, setAddress] = useState(initial.address);
@@ -283,7 +288,8 @@ export function App() {
   useEffect(() => {
     const onPop = () => {
       try {
-        if (new URLSearchParams(window.location.search).get('tab') === 'wallets') return;
+        const t = new URLSearchParams(window.location.search).get('tab');
+        if (t === 'wallets' || t === 'bundle') return;
       } catch {
         /* ignore */
       }
@@ -408,6 +414,7 @@ export function App() {
       )}
 
       {walletsOpened && <WalletsTab active={tab === 'wallets'} onSearch={onPivot} />}
+      {bundleOpened && <BundleTab active={tab === 'bundle'} onSearch={onPivot} />}
 
       <main hidden={tab !== 'search'} className={'main' + (panelOpen ? '' : ' panel-closed') + (mobileTab === 'list' ? ' tab-list' : ' tab-map')}>
         <section className="map">

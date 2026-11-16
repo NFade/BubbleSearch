@@ -82,6 +82,28 @@ export function createDb(file: string) {
       PRIMARY KEY (payer, wallet)
     );
     CREATE INDEX IF NOT EXISTS fee_payers_wallet ON fee_payers(wallet);
+    CREATE TABLE IF NOT EXISTS pool_windows (
+      pool TEXT NOT NULL,
+      from_time INTEGER NOT NULL,
+      to_time INTEGER NOT NULL,
+      fetched_at INTEGER NOT NULL,
+      PRIMARY KEY (pool, from_time, to_time)
+    );
+    CREATE TABLE IF NOT EXISTS pool_transfers (
+      pool TEXT NOT NULL,
+      key TEXT NOT NULL,
+      signature TEXT NOT NULL,
+      slot INTEGER NOT NULL,
+      block_time INTEGER,
+      from_addr TEXT NOT NULL,
+      to_addr TEXT NOT NULL,
+      mint TEXT NOT NULL,
+      amount_raw TEXT NOT NULL,
+      decimals INTEGER NOT NULL,
+      ui_amount REAL NOT NULL,
+      PRIMARY KEY (pool, key)
+    );
+    CREATE INDEX IF NOT EXISTS pool_transfers_time ON pool_transfers(pool, block_time);
     CREATE TABLE IF NOT EXISTS services (
       address TEXT PRIMARY KEY,
       label TEXT NOT NULL,
@@ -301,6 +323,36 @@ export function createDb(file: string) {
         }
       }
       return out;
+    },
+
+    /**
+     * История пула за [from, to] из кэша поиска бандла (отдельно от transfers, чтобы чужие сделки пула не попадали
+     * в обратный индекс). null — такой промежуток целиком ещё не загружался.
+     */
+    getPoolWindow(pool: string, from: number, to: number): Transfer[] | null {
+      const hit = db.prepare('SELECT 1 FROM pool_windows WHERE pool = ? AND from_time <= ? AND to_time >= ? LIMIT 1').get(pool, from, to);
+      if (!hit) return null;
+      return (db.prepare('SELECT * FROM pool_transfers WHERE pool = ? AND block_time BETWEEN ? AND ? ORDER BY slot').all(pool, from, to) as any[]).map(toTransfer);
+    },
+
+    /** Сохраняет прочитанный целиком промежуток истории пула. Конец не позже чем минута назад: свежие сделки ещё дописываются. */
+    setPoolWindow(pool: string, from: number, to: number, rows: Transfer[]): void {
+      const now = Math.floor(Date.now() / 1000);
+      const end = Math.min(to, now - 60);
+      tx(() => {
+        const ins = db.prepare(
+          `INSERT OR IGNORE INTO pool_transfers (pool, key, signature, slot, block_time, from_addr, to_addr, mint, amount_raw, decimals, ui_amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        const seen = new Map<string, number>();
+        for (const t of rows) {
+          const base = `${t.signature}:${t.from}:${t.to}:${t.mint}:${t.amountRaw}`;
+          const n = seen.get(base) ?? 0;
+          seen.set(base, n + 1);
+          ins.run(pool, `${base}:${n}`, t.signature, t.slot, t.blockTime, t.from, t.to, t.mint, t.amountRaw, t.decimals, t.uiAmount);
+        }
+        if (end > from) db.prepare('INSERT OR REPLACE INTO pool_windows (pool, from_time, to_time, fetched_at) VALUES (?, ?, ?, ?)').run(pool, from, end, now);
+      });
     },
 
     /** Сколько отслеживаемых кошельков уже имеют загруженную историю. */

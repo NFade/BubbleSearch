@@ -3,6 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import type {
   AnalyzeRequest,
+  BundleRequest,
   AnalyzeStartResponse,
   ImportResponse,
   JobResponse,
@@ -13,6 +14,7 @@ import type {
   TrackedResponse,
 } from '../shared/types.ts';
 import { createClassifier } from './accounts.ts';
+import { createBundleFinder } from './bundle.ts';
 import { createEngine } from './analyze.ts';
 import { config, isBase58Address } from './config.ts';
 import { createDb } from './db.ts';
@@ -33,6 +35,8 @@ const engine = createEngine({ db, provider, classify, tracked: () => tracked, re
 const grouper = createGroupFinder({ db, provider, classify, tracked: () => tracked, loadHistory: engine.loadHistory, loadPayers: engine.loadPayers });
 const walletsService = createWalletsService({ db, tracked: () => tracked, rpcUrl: config.rpcUrl, rps: config.heliusKey ? config.heliusRps : config.publicRps });
 const linker = createLinkFinder({ db, provider, classify, tracked: () => tracked, loadHistory: engine.loadHistory, loadPayers: engine.loadPayers });
+
+const bundler = createBundleFinder({ db, provider, classify, tracked: () => tracked, loadHistory: engine.loadHistory });
 
 const jobs = new Map<string, JobResponse & { createdAt: number }>();
 const JOB_TTL_MS = 30 * 60_000;
@@ -77,7 +81,7 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-function startJob(kind: JobResponse['kind'], run: (ctx: Ctx) => Promise<Pick<JobResponse, 'result' | 'link' | 'group'>>): string {
+function startJob(kind: JobResponse['kind'], run: (ctx: Ctx) => Promise<Pick<JobResponse, 'result' | 'link' | 'group' | 'bundle'>>): string {
   const now = Date.now();
   for (const [id, j] of jobs) if (now - j.createdAt > JOB_TTL_MS) jobs.delete(id);
   const id = crypto.randomUUID();
@@ -160,6 +164,15 @@ async function api(req: http.IncomingMessage, res: http.ServerResponse, pathname
     if (addresses.length > GROUP_MAX) throw new ApiError(400, `Можно выбрать не больше ${GROUP_MAX} кошельков`);
     if (!addresses.every(isBase58Address)) throw new ApiError(400, 'Некорректный адрес кошелька Solana');
     const out: AnalyzeStartResponse = { jobId: startJob('group', async (ctx) => ({ group: await grouper.group(addresses, body, ctx) })) };
+    return send(res, 200, out);
+  }
+
+  if (method === 'POST' && pathname === '/api/bundle') {
+    const body = (await readBody(req)) as BundleRequest;
+    const address = String(body?.address ?? '').trim();
+    if (!isBase58Address(address)) throw new ApiError(400, 'Некорректный адрес кошелька Solana');
+    if (!config.heliusKey) throw new ApiError(400, 'Поиск бандла работает только с ключом Helius (HELIUS_API_KEY в .env).');
+    const out: AnalyzeStartResponse = { jobId: startJob('bundle', async (ctx) => ({ bundle: await bundler.find(address, body, ctx) })) };
     return send(res, 200, out);
   }
 

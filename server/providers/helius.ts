@@ -24,43 +24,71 @@ export function createHeliusTransfersProvider(apiKey: string, rps: number): Tran
   const url = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
   const limiter = new RateLimiter(rps);
 
+  /** Одна страница (100 строк, 10 кредитов): переводы между владельцами, время всех строк страницы и токен продолжения. */
+  async function onePage(
+    address: string,
+    sortOrder: 'asc' | 'desc',
+    ctx: Ctx,
+    extra: { token?: string; with?: string; window?: [number, number] } = {},
+  ): Promise<{ transfers: Transfer[]; slots: number[]; times: number[]; token: string | undefined }> {
+    let result: any;
+    try {
+      result = await rpcCall(
+        url,
+        'getTransfersByAddress',
+        [
+          address,
+          {
+            limit: PAGE,
+            sortOrder,
+            solMode: 'merged',
+            ...(extra.with ? { with: extra.with } : {}),
+            ...(extra.window ? { filters: { blockTime: { gte: extra.window[0], lte: extra.window[1] } } } : {}),
+            ...(extra.token ? { paginationToken: extra.token } : {}),
+          },
+        ],
+        { limiter, ctx, credits: 10 },
+      );
+    } catch (e) {
+      if (isPlanProblem(e) && !extra.window) throw new PlanError(String((e as Error).message));
+      throw e;
+    }
+    const rows: any[] = result?.data ?? [];
+    const transfers: Transfer[] = [];
+    const slots: number[] = [];
+    const times: number[] = [];
+    for (const r of rows) {
+      slots.push(Number(r.slot ?? 0));
+      if (r.blockTime != null) times.push(Number(r.blockTime));
+      if (r.type !== 'transfer' || !r.fromUserAccount || !r.toUserAccount || r.fromUserAccount === r.toUserAccount) continue;
+      const decimals = Number(r.decimals ?? 0);
+      transfers.push({
+        signature: r.signature,
+        slot: Number(r.slot ?? 0),
+        blockTime: r.blockTime ?? null,
+        from: r.fromUserAccount,
+        to: r.toUserAccount,
+        mint: r.mint === WSOL_MINT ? SOL_MINT : r.mint,
+        amountRaw: String(r.amount ?? '0'),
+        decimals,
+        uiAmount: Number(r.uiAmount ?? Number(r.amount ?? 0) / 10 ** decimals),
+      });
+    }
+    const token = rows.length > 0 ? (result?.paginationToken ?? undefined) : undefined;
+    return { transfers, slots, times, token };
+  }
+
   async function pages(address: string, sortOrder: 'asc' | 'desc', limit: number, ctx: Ctx, extra: { untilSlot?: number; with?: string } = {}) {
     const transfers: Transfer[] = [];
-    let paginationToken: string | undefined;
+    let token: string | undefined;
     let complete = false;
     let reachedKnown = false;
     while (transfers.length < limit) {
-      let result: any;
-      try {
-        result = await rpcCall(
-          url,
-          'getTransfersByAddress',
-          [address, { limit: PAGE, sortOrder, solMode: 'merged', ...(extra.with ? { with: extra.with } : {}), ...(paginationToken ? { paginationToken } : {}) }],
-          { limiter, ctx, credits: 10 },
-        );
-      } catch (e) {
-        if (isPlanProblem(e)) throw new PlanError(String((e as Error).message));
-        throw e;
-      }
-      const rows: any[] = result?.data ?? [];
-      for (const r of rows) {
-        if (extra.untilSlot != null && Number(r.slot ?? 0) < extra.untilSlot) reachedKnown = true;
-        if (r.type !== 'transfer' || !r.fromUserAccount || !r.toUserAccount || r.fromUserAccount === r.toUserAccount) continue;
-        const decimals = Number(r.decimals ?? 0);
-        transfers.push({
-          signature: r.signature,
-          slot: Number(r.slot ?? 0),
-          blockTime: r.blockTime ?? null,
-          from: r.fromUserAccount,
-          to: r.toUserAccount,
-          mint: r.mint === WSOL_MINT ? SOL_MINT : r.mint,
-          amountRaw: String(r.amount ?? '0'),
-          decimals,
-          uiAmount: Number(r.uiAmount ?? Number(r.amount ?? 0) / 10 ** decimals),
-        });
-      }
-      paginationToken = result?.paginationToken ?? undefined;
-      if (!paginationToken || rows.length === 0) {
+      const p = await onePage(address, sortOrder, ctx, { token, with: extra.with });
+      if (extra.untilSlot != null && p.slots.some((s) => s < extra.untilSlot!)) reachedKnown = true;
+      transfers.push(...p.transfers);
+      token = p.token;
+      if (!token) {
         complete = true;
         break;
       }
@@ -69,6 +97,9 @@ export function createHeliusTransfersProvider(apiKey: string, rps: number): Tran
     return { transfers, complete, reachedKnown };
   }
 
+  /** Поддерживает ли метод фильтр по времени: null — ещё не проверяли. */
+  let windowFilter: boolean | null = null;
+
   return {
     name: 'helius-transfers',
     note: 'Helius getTransfersByAddress: полная история переводов SOL и токенов.',
@@ -76,7 +107,114 @@ export function createHeliusTransfersProvider(apiKey: string, rps: number): Tran
     fetchOldest: async (address, limit, ctx) => (await pages(address, 'asc', limit, ctx)).transfers,
     // Фильтр with: только переводы между двумя адресами, за всю историю.
     fetchBetween: async (a, b, limit, ctx) => (await pages(a, 'desc', limit, ctx, { with: b })).transfers.filter((t) => (t.from === a && t.to === b) || (t.from === b && t.to === a)),
+    fetchWindow: (address, fromTime, toTime, maxPages, ctx) =>
+      readWindow(
+        (order, token, filtered) => onePage(address, order, ctx, { token, window: filtered ? [fromTime, toTime] : undefined }),
+        fromTime,
+        toTime,
+        maxPages,
+        { get: () => windowFilter, set: (v) => void (windowFilter = v) },
+      ),
   };
+}
+
+type WindowPage = { transfers: Transfer[]; times: number[]; token: string | undefined };
+
+/**
+ * Читает переводы адреса за [from, to] постранично. Сначала пробует фильтр по времени (если Helius его понимает —
+ * читаются только нужные страницы). Без фильтра: первая страница с конца истории и, если окно дальше, первая с начала;
+ * дальше идёт с той стороны, откуда до окна меньше страниц (оценка по плотности переводов на пробных страницах).
+ * Экспортируется для тестов.
+ */
+export async function readWindow(
+  page: (order: 'asc' | 'desc', token: string | undefined, filtered: boolean) => Promise<WindowPage>,
+  from: number,
+  to: number,
+  maxPages: number,
+  filter: { get: () => boolean | null; set: (v: boolean) => void },
+): Promise<{ transfers: Transfer[]; complete: boolean; pages: number }> {
+  const out = new Map<string, Transfer>();
+  let pages = 0;
+  const keep = (list: Transfer[]) => {
+    for (const t of list) {
+      if (t.blockTime == null || t.blockTime < from || t.blockTime > to) continue;
+      out.set(`${t.signature}:${t.from}:${t.to}:${t.mint}:${t.amountRaw}`, t);
+    }
+  };
+  const done = (complete: boolean) => ({ transfers: [...out.values()].sort((a, b) => a.slot - b.slot), complete, pages });
+  const min = (xs: number[]) => (xs.length ? Math.min(...xs) : null);
+  const max = (xs: number[]) => (xs.length ? Math.max(...xs) : null);
+
+  let ascFirst: WindowPage | null = null;
+  if (filter.get() !== false) {
+    let p: WindowPage | null = null;
+    try {
+      p = await page('asc', undefined, true);
+      pages++;
+    } catch (e) {
+      if (!(e instanceof RpcError || e instanceof HttpError)) throw e;
+      filter.set(false);
+    }
+    if (p) {
+      const inside = p.times.every((t) => t >= from && t <= to);
+      if (p.times.length > 0 && inside) {
+        filter.set(true);
+        keep(p.transfers);
+        let token = p.token;
+        while (token && pages < maxPages) {
+          const q = await page('asc', token, true);
+          pages++;
+          keep(q.transfers);
+          token = q.token;
+        }
+        return done(!token);
+      }
+      if (p.times.length === 0) {
+        if (filter.get() === true) return done(true);
+        // Пустой ответ ничего не доказывает: фильтр может быть не поддержан, а история — пустой. Проверяем без фильтра.
+      } else {
+        filter.set(false);
+        ascFirst = p; // фильтр проигнорирован — это обычная первая страница с начала истории
+      }
+    }
+  }
+
+  const walk = async (order: 'asc' | 'desc', first: WindowPage): Promise<boolean> => {
+    let token = first.token;
+    let edge = order === 'asc' ? max(first.times) : min(first.times);
+    const passed = () => edge != null && (order === 'asc' ? edge > to : edge < from);
+    while (token && !passed() && pages < maxPages) {
+      const q = await page(order, token, false);
+      pages++;
+      keep(q.transfers);
+      token = q.token;
+      const e = order === 'asc' ? max(q.times) : min(q.times);
+      if (e != null) edge = e;
+    }
+    return passed() || !token;
+  };
+
+  const desc = await page('desc', undefined, false);
+  pages++;
+  keep(desc.transfers);
+  const oldestD = min(desc.times);
+  if (!desc.token) return done(true);
+  if (oldestD == null || oldestD <= to) return done(await walk('desc', desc));
+
+  const asc = ascFirst ?? (await page('asc', undefined, false));
+  if (!ascFirst) pages++;
+  keep(asc.transfers);
+  const newestA = max(asc.times);
+  const oldestA = min(asc.times);
+  if (!asc.token) return done(true);
+  if (newestA == null || newestA >= from) return done(await walk('asc', asc));
+
+  // Окно в середине истории: идём с той стороны, откуда до него меньше страниц.
+  const spanA = Math.max(1, newestA - (oldestA ?? newestA));
+  const spanD = Math.max(1, (max(desc.times) ?? oldestD) - oldestD);
+  const pagesFromStart = (to - newestA) / spanA;
+  const pagesFromEnd = (oldestD - from) / spanD;
+  return done(pagesFromStart <= pagesFromEnd ? await walk('asc', asc) : await walk('desc', desc));
 }
 
 /**

@@ -2,6 +2,8 @@ import type {
   AnalyzeRequest,
   AnalyzeResult,
   AnalyzeStartResponse,
+  BundleRequest,
+  BundleResult,
   GroupRequest,
   GroupResult,
   ImportResponse,
@@ -15,6 +17,7 @@ import type {
   WalletsResponse,
 } from '../../shared/types.ts';
 import { buildMockGroup, mockRefresh, mockWallets, MOCK_GROUP_DEEP_PROGRESS, MOCK_GROUP_PROGRESS } from './mockWallets.ts';
+import { buildMockBundle, MOCK_BUNDLE_PROGRESS } from './mockBundle.ts';
 import { buildMockLink, buildMockResult, mockTracked, MOCK_LINK_PROGRESS, MOCK_PROGRESS, MOCK_STATUS } from './mock.ts';
 
 export const isMock: boolean = (() => {
@@ -199,6 +202,23 @@ export function group(req: GroupRequest, onProgress: (lines: string[]) => void):
     async () => {
       await mockProgress(req.deep ? MOCK_GROUP_DEEP_PROGRESS : MOCK_GROUP_PROGRESS, onProgress, () => flag.c)();
       return buildMockGroup(req.addresses, !!req.deep);
+    },
+    onProgress,
+  );
+  return { promise: h.promise, cancel: () => ((flag.c = true), h.cancel()) };
+}
+
+export type BundleHandle = JobHandle<BundleResult>;
+
+export function bundle(req: BundleRequest, onProgress: (lines: string[]) => void): BundleHandle {
+  const flag = { c: false };
+  const h = runJob<BundleResult>(
+    '/api/bundle',
+    req,
+    (job) => job.bundle,
+    async () => {
+      await mockProgress(MOCK_BUNDLE_PROGRESS, onProgress, () => flag.c)();
+      return buildMockBundle(req);
     },
     onProgress,
   );

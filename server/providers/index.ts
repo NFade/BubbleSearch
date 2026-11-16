@@ -42,6 +42,10 @@ export function createDefaultProvider(): TransferProvider {
     fetchRecent: (address, limit, ctx, opts) => withFallback((p) => p.fetchRecent(address, limit, ctx, opts), ctx.log),
     fetchFeePayers: (address, limit, ctx) => feePayers(address, limit, ctx),
     fetchBetween: async (a, b, limit, ctx) => (active.fetchBetween ? active.fetchBetween(a, b, limit, ctx) : []),
+    fetchWindow: async (address, fromTime, toTime, maxPages, ctx) => {
+      if (!active.fetchWindow) throw new Error('Поиск бандла требует метода Helius getTransfersByAddress: текущий источник не умеет читать историю пула за промежуток времени.');
+      return active.fetchWindow(address, fromTime, toTime, maxPages, ctx);
+    },
     fetchOldest: (address, limit, ctx) => withFallback((p) => p.fetchOldest(address, limit, ctx), ctx.log),
   };
 }

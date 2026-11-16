@@ -6,7 +6,7 @@ import type { HistoryEntry } from './history.ts';
 import { isValidAddress } from './util.ts';
 
 export type Mode = 'single' | 'pair';
-export type Tab = 'search' | 'wallets';
+export type Tab = 'search' | 'wallets' | 'bundle';
 export type Hops = 2 | 3 | 4;
 
 interface Props {
@@ -110,6 +110,9 @@ export function TopBar(p: Props) {
         </button>
         <button type="button" role="tab" aria-selected={p.tab === 'wallets'} className={p.tab === 'wallets' ? 'on' : ''} onClick={() => p.setTab('wallets')}>
           Кошельки
+        </button>
+        <button type="button" role="tab" aria-selected={p.tab === 'bundle'} className={p.tab === 'bundle' ? 'on' : ''} onClick={() => p.setTab('bundle')}>
+          Бандл
         </button>
       </div>
 

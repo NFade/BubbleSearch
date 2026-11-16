@@ -37,6 +37,11 @@ export interface TransferProvider {
    * null — источник этого не умеет.
    */
   fetchFeePayers?(address: string, limit: number, ctx: Ctx): Promise<{ payers: Map<string, number>; txCount: number } | null>;
+  /**
+   * Переводы адреса за промежуток времени [fromTime, toTime] (unix-секунды), не больше maxPages запросов.
+   * complete — промежуток прочитан целиком; pages — сколько запросов ушло. Нужен для поиска бандла по истории пула.
+   */
+  fetchWindow?(address: string, fromTime: number, toTime: number, maxPages: number, ctx: Ctx): Promise<{ transfers: Transfer[]; complete: boolean; pages: number }>;
   /** Все переводы между двумя кошельками за всю историю (если источник умеет фильтр по паре). */
   fetchBetween?(a: string, b: string, limit: number, ctx: Ctx): Promise<Transfer[]>;
   /** Самые ранние переводы кошелька. null — провайдер не смог добраться до начала истории. */
